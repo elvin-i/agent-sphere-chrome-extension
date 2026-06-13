@@ -46,7 +46,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       token = data.token;
       baseUrl = data.baseUrl;
       sessionId = newSessionId;
-      chrome.storage.local.set({ sessionId: newSessionId });
+      chrome.storage.local.set({ sessionId: newSessionId }).catch(() => {});
       console.log('[AgentSphere] Tab URL changed, switching to session', newSessionId);
       connectSSE();
     }
@@ -61,8 +61,16 @@ chrome.runtime.onMessage.addListener((msg) => {
     baseUrl = msg.baseUrl;
     chrome.storage.local.set({
       token, sessionId, displayName: msg.displayName || '', baseUrl: msg.baseUrl,
-    });
+    }).catch(() => {});
     connectSSE();
+  }
+  if (msg.type === 'log') {
+    chrome.storage.local.get(['logs'], (data) => {
+      const logs = data.logs || [];
+      logs.push({ time: msg.time || Date.now(), action: msg.action, success: msg.success, detail: msg.detail });
+      if (logs.length > 200) logs.splice(0, logs.length - 200);
+      chrome.storage.local.set({ logs }).catch(() => {});
+    });
   }
 });
 
@@ -112,7 +120,9 @@ async function connectSSE() {
               const params = { url: msg.url, selector: msg.selector, text: msg.text, code: msg.code };
               Object.keys(params).forEach(k => { if (params[k] == null) delete params[k]; });
               console.log('[AgentSphere] Calling executeInPage:', msg.commandId?.slice(0,8), msg.action, Object.keys(params));
-              executeInPage(msg.commandId, msg.action, params);
+              executeInPage(msg.commandId, msg.action, params).catch(e => {
+                console.warn('[AgentSphere] executeInPage rejected:', e.message);
+              });
             }
           } catch (e) {
             console.error('[AgentSphere] Parse error:', e);
@@ -151,8 +161,24 @@ async function executeInPage(commandId, action, params) {
   try {
     // Navigate → open new tab and wait for page load
     if (action === 'navigate') {
+      // Reuse existing tab if same URL is already open
+      if (controlledTabId) {
+        try {
+          const existingTab = await chrome.tabs.get(controlledTabId);
+          if (existingTab?.url === params.url || existingTab?.pendingUrl === params.url) {
+            console.log('[AgentSphere] Reusing existing tab:', controlledTabId);
+            await chrome.tabs.update(controlledTabId, { active: true }).catch(() => {});
+            sendCallbackSafe(commandId, { success: true, data: { tabId: controlledTabId }, action: 'navigate', detail: params.url });
+            return;
+          }
+        } catch (e) {
+          // Tab no longer exists, create a new one
+          console.log('[AgentSphere] Controlled tab gone, creating new one');
+        }
+      }
+
       console.log('[AgentSphere] Creating tab with url:', params.url);
-      const tab = await chrome.tabs.create({ url: params.url, active: false });
+      const tab = await chrome.tabs.create({ url: params.url, active: true });
       console.log('[AgentSphere] Tab created:', tab.id);
 
       // Wait for page to finish loading (HTML + resources)
@@ -173,15 +199,18 @@ async function executeInPage(commandId, action, params) {
       }).catch(() => {});
 
       controlledTabId = tab.id;
-      sendCallback(commandId, { success: true, data: { tabId: tab.id } });
+      sendCallbackSafe(commandId, { success: true, data: { tabId: tab.id }, action: 'navigate', detail: params.url });
       return;
     }
 
-    // Other actions → send to controlled tab or active tab
+    // Other actions → focus controlled tab and send command
+    if (controlledTabId) {
+      await chrome.tabs.update(controlledTabId, { active: true }).catch(() => {});
+    }
     const tabId = controlledTabId || (await getActiveTabId());
     console.log('[AgentSphere] Target tab:', tabId, 'controlledTabId:', controlledTabId);
     if (!tabId) {
-      sendCallback(commandId, { success: false, error: 'No target tab' });
+      sendCallbackSafe(commandId, { success: false, error: 'No target tab', action });
       return;
     }
 
@@ -193,10 +222,10 @@ async function executeInPage(commandId, action, params) {
     });
     console.log('[AgentSphere] Tab result:', result);
 
-    sendCallback(commandId, result || { success: false, error: 'No response from page' });
+    sendCallbackSafe(commandId, { ...result, action, detail: params.selector || params.url || '' });
   } catch (e) {
     console.error('[AgentSphere] executeInPage error:', e.message);
-    sendCallback(commandId, { success: false, error: e.message });
+    sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: e.message });
   }
 }
 
@@ -206,8 +235,15 @@ async function getActiveTabId() {
 }
 
 // --- Send result back to backend ---
+function sendCallbackSafe(commandId, result) {
+  sendCallback(commandId, result).catch(e => {
+    console.warn('[AgentSphere] sendCallback rejected:', e.message);
+  });
+}
+
 async function sendCallback(commandId, result) {
   try {
+    const actionResult = result;
     await fetch(`${baseUrl}/api/v1/chrome/callback?sessionId=${sessionId}`, {
       method: 'POST',
       headers: {
@@ -216,6 +252,14 @@ async function sendCallback(commandId, result) {
       },
       body: JSON.stringify({ commandId, ...result }),
     });
+
+    // Record log
+    chrome.storage.local.get(['logs'], (data) => {
+      const logs = data.logs || [];
+      logs.push({ time: Date.now(), action: result?.action || 'callback', success: !!result?.success, detail: result?.error || '' });
+      if (logs.length > 200) logs.splice(0, logs.length - 200);
+      chrome.storage.local.set({ logs }).catch(() => {});
+    });
   } catch (e) {
     console.error('[AgentSphere] Failed to send callback:', e);
   }
@@ -223,5 +267,5 @@ async function sendCallback(commandId, result) {
 
 // --- Notify popup about connection status ---
 function updatePopupStatus(connected) {
-  chrome.storage.local.set({ connected });
+  chrome.storage.local.set({ connected }).catch(() => {});
 }
