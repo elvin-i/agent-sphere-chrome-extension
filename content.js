@@ -16,17 +16,28 @@
       if (!m) return;
 
       const sid = Number(m[1]);
-      if (sid === lastSessionId) return;  // 没有变化，跳过
+      if (sid === lastSessionId) return;
       lastSessionId = sid;
+
+      // Connect directly to backend (8080) instead of frontend proxy (8000)
+      const backendPort = 8080;
+      const baseUrl = location.port
+        ? `http://${location.hostname}:${backendPort}`
+        : location.origin;
 
       chrome.runtime.sendMessage(chrome.runtime.id, {
         type: 'auth',
         token: user.token,
         displayName: user.displayName || '',
         sessionId: sid,
-        baseUrl: location.origin,
+        baseUrl,
+      }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('[AgentSphere] auth send failed, will retry on next poll');
+        }
       });
     } catch (e) {
+      if (e.message?.includes('Extension context invalidated')) return;
       console.warn('[AgentSphere] Failed to read auth:', e);
     }
   }
@@ -97,6 +108,29 @@
     const el = node;
     const tag = el.tagName.toLowerCase();
     if (['script', 'style', 'noscript', 'iframe', 'svg', 'canvas'].includes(tag)) return null;
+
+    // Interactive elements: preserve key attributes for LLM
+    if (tag === 'input') return {
+      tag: 'input',
+      name: el.name || '',
+      placeholder: el.getAttribute('placeholder') || '',
+      type: el.type || '',
+    };
+
+    if (tag === 'button') return {
+      tag: 'button',
+      text: el.textContent?.trim().slice(0, 100),
+    };
+
+    if (tag === 'textarea') return {
+      tag: 'textarea',
+      placeholder: el.getAttribute('placeholder') || '',
+    };
+
+    if (tag === 'select') return {
+      tag: 'select',
+      children: Array.from(el.options).map(o => o.text).filter(Boolean),
+    };
 
     let result = {};
     if (el.id) result._id = el.id;

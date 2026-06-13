@@ -19,6 +19,40 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+// --- Start SSE on startup ---
+function startSSE() {
+  chrome.storage.local.get(['token', 'sessionId', 'baseUrl'], (data) => {
+    if (data.token && data.sessionId && data.baseUrl) {
+      token = data.token;
+      sessionId = data.sessionId;
+      baseUrl = data.baseUrl;
+      connectSSE();
+    }
+  });
+}
+
+startSSE();
+
+// --- Detect session changes from tab URL (works even without content script) ---
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!changeInfo.url) return;
+  const m = changeInfo.url.match(/\/chat\/(\d+)/);
+  if (!m) return;
+  const newSessionId = Number(m[1]);
+  if (newSessionId === sessionId) return;
+
+  chrome.storage.local.get(['token', 'baseUrl'], (data) => {
+    if (data.token && data.baseUrl) {
+      token = data.token;
+      baseUrl = data.baseUrl;
+      sessionId = newSessionId;
+      chrome.storage.local.set({ sessionId: newSessionId });
+      console.log('[AgentSphere] Tab URL changed, switching to session', newSessionId);
+      connectSSE();
+    }
+  });
+});
+
 // --- Listen for auth info from content script ---
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'auth' && msg.token && msg.sessionId) {
@@ -28,16 +62,6 @@ chrome.runtime.onMessage.addListener((msg) => {
     chrome.storage.local.set({
       token, sessionId, displayName: msg.displayName || '', baseUrl: msg.baseUrl,
     });
-    connectSSE();
-  }
-});
-
-// --- Recover auth from storage on service worker restart ---
-chrome.storage.local.get(['token', 'sessionId', 'baseUrl'], (data) => {
-  if (data.token && data.sessionId && data.baseUrl) {
-    token = data.token;
-    sessionId = data.sessionId;
-    baseUrl = data.baseUrl;
     connectSSE();
   }
 });
@@ -104,17 +128,50 @@ async function connectSSE() {
   }
 }
 
+// --- Send message to content script with retry ---
+async function sendMessageWithRetry(tabId, msg, maxRetries = 5) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, msg);
+    } catch (e) {
+      if (e.message?.includes('Receiving end does not exist') && i < maxRetries - 1) {
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 // --- Execute command in the appropriate tab ---
 let controlledTabId = null;
 
 async function executeInPage(commandId, action, params) {
   console.log('[AgentSphere] executeInPage:', action, params);
   try {
-    // Navigate → open new tab
+    // Navigate → open new tab and wait for page load
     if (action === 'navigate') {
       console.log('[AgentSphere] Creating tab with url:', params.url);
       const tab = await chrome.tabs.create({ url: params.url, active: false });
       console.log('[AgentSphere] Tab created:', tab.id);
+
+      // Wait for page to finish loading (HTML + resources)
+      await new Promise((resolve) => {
+        const listener = (tabId, info) => {
+          if (tabId === tab.id && info.status === 'complete') {
+            chrome.tabs.onUpdated.removeListener(listener);
+            resolve();
+          }
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+      });
+
+      // Wait for idle (async rendering / SPA scripts done)
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => new Promise(r => requestIdleCallback(r, { timeout: 5000 })),
+      }).catch(() => {});
+
       controlledTabId = tab.id;
       sendCallback(commandId, { success: true, data: { tabId: tab.id } });
       return;
@@ -129,7 +186,7 @@ async function executeInPage(commandId, action, params) {
     }
 
     console.log('[AgentSphere] Sending to tab', tabId, ':', action, params);
-    const result = await chrome.tabs.sendMessage(tabId, {
+    const result = await sendMessageWithRetry(tabId, {
       type: 'browser_operation',
       action,
       params,
