@@ -153,12 +153,32 @@
         }
 
         case 'type': {
-          const el = document.querySelector(params.selector);
+          let el = document.querySelector(params.selector);
           if (!el) return { success: false, error: 'Input not found: ' + params.selector };
-          el.value = params.text;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          return { success: true };
+
+          // 如果选中的是非编辑 DIV，向内找 contenteditable 子元素
+          if (el.tagName === 'DIV' && !el.isContentEditable) {
+            const inner = el.querySelector('[contenteditable="true"]');
+            if (inner) el = inner;
+          }
+
+          // 富文本编辑器 (contenteditable div)
+          if (el.isContentEditable) {
+            el.focus();
+            el.textContent = params.text;
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+            return { success: true };
+          }
+
+          // 普通 input/textarea
+          if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+            el.value = params.text;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return { success: true };
+          }
+
+          return { success: false, error: 'Unsupported element: ' + el.tagName };
         }
 
         case 'getContent': {
@@ -197,6 +217,7 @@
     if (tag === 'button') return { tag: 'button', text: el.textContent?.trim().slice(0, 100) };
     if (tag === 'textarea') return { tag: 'textarea', placeholder: el.getAttribute('placeholder') || '' };
     if (tag === 'select') return { tag: 'select', children: Array.from(el.options).map(o => o.text).filter(Boolean) };
+    if (el.isContentEditable) return { tag, editable: true, placeholder: el.getAttribute('data-placeholder') || '', text: el.textContent?.trim().slice(0, 100) };
 
     let result = {};
     if (el.id) result._id = el.id;
