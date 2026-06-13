@@ -124,8 +124,23 @@
     }
   });
 
+  // --- Highlight element being operated on ---
+  function highlightElement(selector) {
+    if (!selector) return;
+    const el = document.querySelector(selector);
+    if (!el) return;
+    const orig = { outline: el.style.outline, outlineOffset: el.style.outlineOffset };
+    el.style.outline = '3px solid #0a84ff';
+    el.style.outlineOffset = '2px';
+    setTimeout(() => {
+      el.style.outline = orig.outline;
+      el.style.outlineOffset = orig.outlineOffset;
+    }, 1500);
+  }
+
   async function execute(action, params) {
     try {
+      highlightElement(params.selector);
       switch (action) {
       case 'navigate':
         return { success: true };
