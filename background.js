@@ -8,6 +8,17 @@ let baseUrl = '';
 let abortController = null;
 let reconnectTimer = null;
 
+// --- Keep SW alive: check connection every minute ---
+chrome.alarms.create('sse-keepalive', { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'sse-keepalive') {
+    if (!abortController || abortController.signal.aborted) {
+      console.log('[AgentSphere] Keepalive: reconnecting SSE');
+      connectSSE();
+    }
+  }
+});
+
 // --- Listen for auth info from content script ---
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'auth' && msg.token && msg.sessionId) {

@@ -2,58 +2,38 @@
  * Content Script - Reads auth state from page, executes browser operations.
  */
 (function () {
-  let connected = false;
 
   // --- Read auth and session info ---
+  let lastSessionId = null;
+
   function checkAuth() {
     try {
       const raw = localStorage.getItem('agent-user');
       if (!raw) return;
       const user = JSON.parse(raw);
-      const token = user && user.token;
-      const displayName = user && user.displayName;
+      if (!user || !user.token) return;
       const m = location.pathname.match(/\/chat\/(\d+)/);
-      const sessionId = m ? Number(m[1]) : null;
-      const baseUrl = location.origin;
+      if (!m) return;
 
-      if (token && sessionId) {
-        chrome.runtime.sendMessage(chrome.runtime.id, {
-          type: 'auth',
-          token,
-          displayName,
-          sessionId,
-          baseUrl,
-        });
-        connected = true;
-      }
+      const sid = Number(m[1]);
+      if (sid === lastSessionId) return;  // 没有变化，跳过
+      lastSessionId = sid;
+
+      chrome.runtime.sendMessage(chrome.runtime.id, {
+        type: 'auth',
+        token: user.token,
+        displayName: user.displayName || '',
+        sessionId: sid,
+        baseUrl: location.origin,
+      });
     } catch (e) {
       console.warn('[AgentSphere] Failed to read auth:', e);
     }
   }
 
-  // Initial check
+  // Initial check + poll every 1s for session changes
   checkAuth();
-
-  // Poll every 2s until connected (handles login after page load)
-  const pollTimer = setInterval(() => {
-    if (connected) { clearInterval(pollTimer); return; }
-    checkAuth();
-  }, 2000);
-
-  // Detect SPA route changes (UmiJS/pushState)
-  window.addEventListener('popstate', () => setTimeout(checkAuth, 200));
-
-  const origPushState = history.pushState;
-  history.pushState = function () {
-    origPushState.apply(this, arguments);
-    setTimeout(checkAuth, 200);
-  };
-
-  const origReplaceState = history.replaceState;
-  history.replaceState = function () {
-    origReplaceState.apply(this, arguments);
-    setTimeout(checkAuth, 200);
-  };
+  setInterval(checkAuth, 1000);
 
   // --- Listen for browser operation commands from background ---
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

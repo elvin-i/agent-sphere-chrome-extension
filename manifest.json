@@ -3,7 +3,7 @@
   "name": "AgentSphere",
   "version": "1.0",
   "description": "Bridges AgentSphere AI with your browser for automated operations",
-  "permissions": ["tabs", "scripting", "storage", "activeTab"],
+  "permissions": ["tabs", "scripting", "storage", "activeTab", "alarms"],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [{
     "matches": ["<all_urls>"],
