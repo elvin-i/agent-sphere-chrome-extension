@@ -148,6 +148,15 @@
       case 'click': {
           const el = document.querySelector(params.selector);
           if (!el) return { success: false, error: 'Element not found: ' + params.selector };
+          // 表单提交按钮 → 提取 action URL，不依赖 click()
+          if (el.tagName === 'BUTTON' && el.type === 'submit' && el.form) {
+            const formData = new FormData(el.form);
+            const url = new URL(el.form.action || location.href);
+            for (const [key, val] of formData.entries()) {
+              url.searchParams.set(key, val);
+            }
+            return { success: true, data: { _submitUrl: url.href, tag: 'form', text: el.textContent?.trim().slice(0, 100) } };
+          }
           el.click();
           return { success: true, data: { tag: el.tagName.toLowerCase(), text: el.textContent?.trim().slice(0, 100) } };
         }

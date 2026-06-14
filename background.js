@@ -120,9 +120,7 @@ async function connectSSE() {
               const params = { url: msg.url, selector: msg.selector, text: msg.text, code: msg.code };
               Object.keys(params).forEach(k => { if (params[k] == null) delete params[k]; });
               console.log('[AgentSphere] Calling executeInPage:', msg.commandId?.slice(0,8), msg.action, Object.keys(params));
-              executeInPage(msg.commandId, msg.action, params).catch(e => {
-                console.warn('[AgentSphere] executeInPage rejected:', e.message);
-              });
+              await executeInPage(msg.commandId, msg.action, params);
             }
           } catch (e) {
             console.error('[AgentSphere] Parse error:', e);
@@ -218,26 +216,100 @@ async function executeInPage(commandId, action, params) {
       return;
     }
 
-    // Other actions → focus controlled tab and send command
-    if (controlledTabId) {
-      await chrome.tabs.update(controlledTabId, { active: true }).catch(() => {});
+    // ExecuteJS → use chrome.debugger Runtime.evaluate (bypasses CSP entirely)
+    if (action === 'executeJS') {
+      const targetTabId = params.tabId || controlledTabId || (await getActiveTabId());
+      if (!targetTabId) {
+        sendCallbackSafe(commandId, { success: false, error: 'No target tab', action });
+        return;
+      }
+      try {
+        await chrome.debugger.attach({ tabId: targetTabId }, "1.3");
+        const { result: evalResult } = await chrome.debugger.sendCommand(
+          { tabId: targetTabId },
+          "Runtime.evaluate",
+          { expression: params.code, returnByValue: true }
+        );
+        await chrome.debugger.detach({ tabId: targetTabId });
+        sendCallbackSafe(commandId, {
+          success: !evalResult?.exceptionDetails,
+          data: evalResult?.value,
+          error: evalResult?.exceptionDetails?.text || null,
+          action,
+          detail: params.code,
+        });
+      } catch (e) {
+        if (e.message?.includes('already attached')) {
+          await chrome.debugger.detach({ tabId: targetTabId }).catch(() => {});
+        }
+        sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: params.code });
+      }
+      return;
     }
-    const tabId = controlledTabId || (await getActiveTabId());
-    console.log('[AgentSphere] Target tab:', tabId, 'controlledTabId:', controlledTabId);
-    if (!tabId) {
+
+    // Other actions → send to controlled tab or active tab (or use params.tabId)
+    const targetTabId = params.tabId || controlledTabId || (await getActiveTabId());
+    console.log('[AgentSphere] Target tab:', targetTabId, 'controlledTabId:', controlledTabId, 'params.tabId:', params.tabId);
+    if (!targetTabId) {
       sendCallbackSafe(commandId, { success: false, error: 'No target tab', action });
       return;
     }
 
-    console.log('[AgentSphere] Sending to tab', tabId, ':', action, params);
-    const result = await sendMessageWithRetry(tabId, {
+    console.log('[AgentSphere] Sending to tab', targetTabId, ':', action, params);
+
+    // Set up listener for form submit → new tab navigation
+    const navPromise = new Promise(resolve => {
+      const timer = setTimeout(() => resolve(null), 4000);
+      const handler = (details) => {
+        if (details.sourceTabId === targetTabId) {
+          chrome.webNavigation.onCreatedNavigationTarget.removeListener(handler);
+          clearTimeout(timer);
+          resolve(details);
+        }
+      };
+      chrome.webNavigation.onCreatedNavigationTarget.addListener(handler);
+    });
+
+    const result = await sendMessageWithRetry(targetTabId, {
       type: 'browser_operation',
       action,
       params,
     });
     console.log('[AgentSphere] Tab result:', result);
 
-    sendCallbackSafe(commandId, { ...result, action, detail: params.selector || params.url || '' });
+    // Form submit detected → navigate to extracted URL directly
+    if (result?.data?._submitUrl) {
+      console.log('[AgentSphere] Form submit detected, navigating to:', result.data._submitUrl);
+      executeInPage(commandId, 'navigate', { url: result.data._submitUrl });
+      return;
+    }
+
+    // Detect new tab opened by form submit (e.g.淘宝搜索 → s.taobao.com)
+    let extraData = {};
+    if (result?.success) {
+      try {
+        const navResult = await navPromise;
+        if (navResult) {
+          await new Promise((resolve) => {
+            const listener = (id, info) => {
+              if (id === navResult.tabId && info.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(listener);
+                resolve();
+              }
+            };
+            chrome.tabs.onUpdated.addListener(listener);
+            setTimeout(resolve, 8000);
+          });
+          const newTabInfo = await chrome.tabs.get(navResult.tabId).catch(() => null);
+          extraData._newTab = { tabId: navResult.tabId, url: newTabInfo?.url || navResult.url };
+          console.log('[AgentSphere] Detected new tab via navigation:', extraData._newTab);
+        }
+      } catch (e) {
+        console.warn('[AgentSphere] New tab detection failed:', e.message);
+      }
+    }
+
+    sendCallbackSafe(commandId, { ...result, ...extraData, action, detail: params.selector || params.url || '' });
   } catch (e) {
     console.error('[AgentSphere] executeInPage error:', e.message);
     sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: e.message });
