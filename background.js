@@ -166,7 +166,6 @@ async function executeInPage(commandId, action, params) {
           const existingTab = await chrome.tabs.get(controlledTabId);
           if (existingTab?.url === params.url || existingTab?.pendingUrl === params.url) {
             console.log('[AgentSphere] Reusing existing tab:', controlledTabId);
-            await chrome.tabs.update(controlledTabId, { active: true }).catch(() => {});
             const existingUrl = existingTab.url || params.url;
             sendCallbackSafe(commandId, {
               success: true,
@@ -183,7 +182,7 @@ async function executeInPage(commandId, action, params) {
       }
 
       console.log('[AgentSphere] Creating tab with url:', params.url);
-      const tab = await chrome.tabs.create({ url: params.url, active: true });
+      const tab = await chrome.tabs.create({ url: params.url, active: false });
       console.log('[AgentSphere] Tab created:', tab.id);
 
       // Wait for page to finish loading (HTML + resources)
@@ -287,19 +286,24 @@ async function getActiveTabId() {
 // --- Capture screenshot of a tab via chrome.debugger ---
 async function captureScreenshot(tabId) {
   if (!tabId) return null;
+  let attached = false;
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
+    attached = true;
     const { data } = await chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", {
       format: 'jpeg',
       quality: 60,
     });
-    await chrome.debugger.detach({ tabId });
     return data;
   } catch (e) {
     if (e.message?.includes('already attached')) {
-      await chrome.debugger.detach({ tabId }).catch(() => {});
+      attached = true;
     }
     return null;
+  } finally {
+    if (attached) {
+      await chrome.debugger.detach({ tabId }).catch(() => {});
+    }
   }
 }
 
@@ -307,11 +311,40 @@ async function captureScreenshot(tabId) {
 async function sendCallbackSafe(commandId, result, captureTabId) {
   try {
     const screenshot = await captureScreenshot(captureTabId);
-    if (screenshot) result = { ...result, screenshot };
-  } catch (e) {}
+    console.log('[AgentSphere] captureScreenshot:', screenshot ? `ok ${screenshot.length}chars` : 'null', 'tabId:', captureTabId);
+    if (screenshot) {
+      sendScreenshotToFrontend(screenshot, result.action, result.detail).catch(() => {});
+    }
+  } catch (e) {
+    console.warn('[AgentSphere] captureScreenshot error:', e.message);
+  }
   sendCallback(commandId, result).catch(e => {
     console.warn('[AgentSphere] sendCallback rejected:', e.message);
   });
+}
+
+// --- Send screenshot directly to the frontend chat tab, bypassing backend ---
+async function sendScreenshotToFrontend(screenshot, action, url) {
+  const { settings } = await chrome.storage.local.get(['settings']);
+  const baseUrl = settings?.frontendUrl || 'http://localhost:8000';
+  const tabs = await chrome.tabs.query({});
+  const chatTab = tabs.find(t => {
+    const u = t.url || t.pendingUrl || '';
+    return u.startsWith(baseUrl) && u.includes('/chat/');
+  });
+  console.log('[AgentSphere] sendScreenshot chatTab:', chatTab?.id, chatTab?.url, 'baseUrl:', baseUrl);
+  if (!chatTab) return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: chatTab.id },
+      func: (s, u) => {
+        window.dispatchEvent(new CustomEvent('page_screenshot', { detail: { screenshot: s, url: u } }));
+      },
+      args: [screenshot, url || ''],
+    });
+  } catch (e) {
+    console.warn('[AgentSphere] sendScreenshot executeScript failed:', e.message);
+  }
 }
 
 async function sendCallback(commandId, result) {

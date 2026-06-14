@@ -67,6 +67,7 @@
 
   // --- SSE status toast + session switch notification ---
   setInterval(() => {
+    if (!chrome.runtime?.id) return;
     chrome.storage.local.get(['connected', 'sessionId'], (data) => {
       const connected = !!data.connected;
 
@@ -121,6 +122,9 @@
     if (msg.type === 'browser_operation') {
       execute(msg.action, msg.params).then(sendResponse);
       return true;
+    }
+    if (msg.type === 'page_screenshot') {
+      window.postMessage({ type: 'page_screenshot', screenshot: msg.screenshot, url: msg.url }, '*');
     }
   });
 
