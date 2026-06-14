@@ -186,7 +186,9 @@
             ? document.querySelector(params.selector)
             : document.body;
           if (!root) return { success: false, error: 'Root not found' };
-          return { success: true, data: domToJSON(root) };
+          const dom = domToJSON(root) || {};
+          dom._url = location.href;
+          return { success: true, data: dom };
         }
 
         case 'executeJS': {

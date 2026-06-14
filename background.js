@@ -168,7 +168,13 @@ async function executeInPage(commandId, action, params) {
           if (existingTab?.url === params.url || existingTab?.pendingUrl === params.url) {
             console.log('[AgentSphere] Reusing existing tab:', controlledTabId);
             await chrome.tabs.update(controlledTabId, { active: true }).catch(() => {});
-            sendCallbackSafe(commandId, { success: true, data: { tabId: controlledTabId }, action: 'navigate', detail: params.url });
+            const existingUrl = existingTab.url || params.url;
+            sendCallbackSafe(commandId, {
+              success: true,
+              data: { tabId: controlledTabId, url: existingUrl, redirected: existingUrl !== params.url },
+              action: 'navigate',
+              detail: params.url,
+            });
             return;
           }
         } catch (e) {
@@ -198,8 +204,17 @@ async function executeInPage(commandId, action, params) {
         func: () => new Promise(r => requestIdleCallback(r, { timeout: 5000 })),
       }).catch(() => {});
 
+      // Get final URL (after potential redirects)
+      const finalTab = await chrome.tabs.get(tab.id).catch(() => tab);
+      const finalUrl = finalTab.url || params.url;
+
       controlledTabId = tab.id;
-      sendCallbackSafe(commandId, { success: true, data: { tabId: tab.id }, action: 'navigate', detail: params.url });
+      sendCallbackSafe(commandId, {
+        success: true,
+        data: { tabId: tab.id, url: finalUrl, redirected: finalUrl !== params.url },
+        action: 'navigate',
+        detail: params.url,
+      });
       return;
     }
 
