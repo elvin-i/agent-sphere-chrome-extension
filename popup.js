@@ -24,6 +24,11 @@
     setTimeout(() => { btn.textContent = 'Save Settings'; btn.className = 'btn btn-primary'; }, 1500);
   });
 
+  // --- Clear logs ---
+  document.getElementById('btnClearLogs').addEventListener('click', () => {
+    chrome.storage.local.set({ logs: [] }).catch(() => {});
+  });
+
   // --- Render ---
   function render(data) {
     const connected = data.connected;
