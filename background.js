@@ -257,19 +257,6 @@ async function executeInPage(commandId, action, params) {
 
     console.log('[AgentSphere] Sending to tab', targetTabId, ':', action, params);
 
-    // Set up listener for form submit → new tab navigation
-    const navPromise = new Promise(resolve => {
-      const timer = setTimeout(() => resolve(null), 4000);
-      const handler = (details) => {
-        if (details.sourceTabId === targetTabId) {
-          chrome.webNavigation.onCreatedNavigationTarget.removeListener(handler);
-          clearTimeout(timer);
-          resolve(details);
-        }
-      };
-      chrome.webNavigation.onCreatedNavigationTarget.addListener(handler);
-    });
-
     const result = await sendMessageWithRetry(targetTabId, {
       type: 'browser_operation',
       action,
@@ -277,39 +264,14 @@ async function executeInPage(commandId, action, params) {
     });
     console.log('[AgentSphere] Tab result:', result);
 
-    // Form submit detected → navigate to extracted URL directly
+    // Form submit button detected → navigate to extracted URL directly
     if (result?.data?._submitUrl) {
       console.log('[AgentSphere] Form submit detected, navigating to:', result.data._submitUrl);
       executeInPage(commandId, 'navigate', { url: result.data._submitUrl });
       return;
     }
 
-    // Detect new tab opened by form submit (e.g.淘宝搜索 → s.taobao.com)
-    let extraData = {};
-    if (result?.success) {
-      try {
-        const navResult = await navPromise;
-        if (navResult) {
-          await new Promise((resolve) => {
-            const listener = (id, info) => {
-              if (id === navResult.tabId && info.status === 'complete') {
-                chrome.tabs.onUpdated.removeListener(listener);
-                resolve();
-              }
-            };
-            chrome.tabs.onUpdated.addListener(listener);
-            setTimeout(resolve, 8000);
-          });
-          const newTabInfo = await chrome.tabs.get(navResult.tabId).catch(() => null);
-          extraData._newTab = { tabId: navResult.tabId, url: newTabInfo?.url || navResult.url };
-          console.log('[AgentSphere] Detected new tab via navigation:', extraData._newTab);
-        }
-      } catch (e) {
-        console.warn('[AgentSphere] New tab detection failed:', e.message);
-      }
-    }
-
-    sendCallbackSafe(commandId, { ...result, ...extraData, action, detail: params.selector || params.url || '' });
+    sendCallbackSafe(commandId, { ...result, action, detail: params.selector || params.url || '' });
   } catch (e) {
     console.error('[AgentSphere] executeInPage error:', e.message);
     sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: e.message });

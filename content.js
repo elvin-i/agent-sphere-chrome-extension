@@ -148,14 +148,25 @@
       case 'click': {
           const el = document.querySelector(params.selector);
           if (!el) return { success: false, error: 'Element not found: ' + params.selector };
-          // 表单提交按钮 → 提取 action URL，不依赖 click()
-          if (el.tagName === 'BUTTON' && el.type === 'submit' && el.form) {
+          // 表单提交类元素 → 提取 action URL，不依赖 click()
+          const isSubmitBtn = (el.tagName === 'BUTTON' && el.type === 'submit')
+            || (el.tagName === 'INPUT' && el.type === 'submit');
+          if (isSubmitBtn && el.form) {
             const formData = new FormData(el.form);
             const url = new URL(el.form.action || location.href);
             for (const [key, val] of formData.entries()) {
               url.searchParams.set(key, val);
             }
             return { success: true, data: { _submitUrl: url.href, tag: 'form', text: el.textContent?.trim().slice(0, 100) } };
+          }
+          // <form> 元素本身 → 提取 action + 第一输入项
+          if (el.tagName === 'FORM') {
+            const formData = new FormData(el);
+            const url = new URL(el.action || location.href);
+            for (const [key, val] of formData.entries()) {
+              url.searchParams.set(key, val);
+            }
+            return { success: true, data: { _submitUrl: url.href, tag: 'form' } };
           }
           el.click();
           return { success: true, data: { tag: el.tagName.toLowerCase(), text: el.textContent?.trim().slice(0, 100) } };
@@ -191,6 +202,31 @@
         }
 
         case 'getContent': {
+          if (params.mode === 'summary') {
+            const inputs = [...document.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="combobox"]')]
+              .map(el => ({
+                tag: el.tagName.toLowerCase(),
+                type: el.type || '',
+                name: el.name || '',
+                selector: el.id ? `#${el.id}` : el.name ? `[name="${el.name}"]` : '',
+                placeholder: el.placeholder || '',
+                value: el.value || el.textContent?.slice(0, 50) || '',
+              })).filter(i => i.selector || i.placeholder || i.name);
+            const buttons = [...document.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"]')]
+              .map(el => ({
+                tag: el.tagName.toLowerCase(),
+                type: el.type || '',
+                selector: el.id ? `#${el.id}` : el.className ? `.${el.className.split(' ').filter(Boolean).join('.')}` : '',
+                text: el.textContent?.trim().slice(0, 50) || el.value || '',
+              })).filter(b => b.text || b.selector);
+            const forms = [...document.querySelectorAll('form')].map(f => ({
+              selector: f.id ? `#${f.id}` : f.className ? `.${f.className.split(' ').filter(Boolean).join('.')}` : '',
+              action: f.action || '',
+              method: f.method || 'get',
+              inputs: [...f.querySelectorAll('input[name], select[name], textarea[name]')].length,
+            })).filter(f => f.inputs > 0);
+            return { success: true, data: { _url: location.href, inputs, buttons, forms } };
+          }
           const root = params.selector
             ? document.querySelector(params.selector)
             : document.body;
