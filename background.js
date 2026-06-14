@@ -117,10 +117,11 @@ async function connectSSE() {
             const msg = JSON.parse(dataLine);
             console.log('[AgentSphere] SSE msg:', msg.eventType, msg.action, msg.url?.slice(0,30));
             if (msg.eventType === 'browser_operation') {
-              const params = { url: msg.url, selector: msg.selector, text: msg.text, code: msg.code };
+              const cmd = msg.command || msg;
+              const params = { url: cmd.url, selector: cmd.selector, text: cmd.text, code: cmd.code };
               Object.keys(params).forEach(k => { if (params[k] == null) delete params[k]; });
-              console.log('[AgentSphere] Calling executeInPage:', msg.commandId?.slice(0,8), msg.action, Object.keys(params));
-              await executeInPage(msg.commandId, msg.action, params);
+              console.log('[AgentSphere] Calling executeInPage:', cmd.commandId?.slice(0,8), cmd.action, Object.keys(params));
+              await executeInPage(cmd.commandId, cmd.action, params);
             }
           } catch (e) {
             console.error('[AgentSphere] Parse error:', e);
@@ -172,7 +173,7 @@ async function executeInPage(commandId, action, params) {
               data: { tabId: controlledTabId, url: existingUrl, redirected: existingUrl !== params.url },
               action: 'navigate',
               detail: params.url,
-            });
+            }, controlledTabId);
             return;
           }
         } catch (e) {
@@ -212,7 +213,7 @@ async function executeInPage(commandId, action, params) {
         data: { tabId: tab.id, url: finalUrl, redirected: finalUrl !== params.url },
         action: 'navigate',
         detail: params.url,
-      });
+      }, tab.id);
       return;
     }
 
@@ -237,12 +238,12 @@ async function executeInPage(commandId, action, params) {
           error: evalResult?.exceptionDetails?.text || null,
           action,
           detail: params.code,
-        });
+        }, targetTabId);
       } catch (e) {
         if (e.message?.includes('already attached')) {
           await chrome.debugger.detach({ tabId: targetTabId }).catch(() => {});
         }
-        sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: params.code });
+        sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: params.code }, targetTabId);
       }
       return;
     }
@@ -271,10 +272,10 @@ async function executeInPage(commandId, action, params) {
       return;
     }
 
-    sendCallbackSafe(commandId, { ...result, action, detail: params.selector || params.url || '' });
+    sendCallbackSafe(commandId, { ...result, action, detail: params.selector || params.url || '' }, targetTabId);
   } catch (e) {
     console.error('[AgentSphere] executeInPage error:', e.message);
-    sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: e.message });
+    sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: e.message }, controlledTabId);
   }
 }
 
@@ -283,8 +284,31 @@ async function getActiveTabId() {
   return tab?.id;
 }
 
+// --- Capture screenshot of a tab via chrome.debugger ---
+async function captureScreenshot(tabId) {
+  if (!tabId) return null;
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    const { data } = await chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", {
+      format: 'jpeg',
+      quality: 60,
+    });
+    await chrome.debugger.detach({ tabId });
+    return data;
+  } catch (e) {
+    if (e.message?.includes('already attached')) {
+      await chrome.debugger.detach({ tabId }).catch(() => {});
+    }
+    return null;
+  }
+}
+
 // --- Send result back to backend ---
-function sendCallbackSafe(commandId, result) {
+async function sendCallbackSafe(commandId, result, captureTabId) {
+  try {
+    const screenshot = await captureScreenshot(captureTabId);
+    if (screenshot) result = { ...result, screenshot };
+  } catch (e) {}
   sendCallback(commandId, result).catch(e => {
     console.warn('[AgentSphere] sendCallback rejected:', e.message);
   });
