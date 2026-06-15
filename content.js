@@ -169,8 +169,16 @@
           let el = null;
           if (params.selector) el = document.querySelector(params.selector);
           if (!el && params.text) {
-            const xpath = `//*[text()[normalize-space()='${params.text.replace(/'/g, "\\'")}']]`;
-            el = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            const text = params.text.replace(/'/g, "\\'");
+            // Phase 1: exact normalize-space XPath
+            el = document.evaluate(`//*[text()[normalize-space()='${text}']]`, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            // Phase 2: contains() on direct text node
+            if (!el) el = document.evaluate(`//*[contains(text(), '${text}')]`, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            // Phase 3: any descendant contains → up-search to clickable ancestor
+            if (!el) {
+              const anyNode = document.evaluate(`//*[contains(., '${text}')]`, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+              if (anyNode) el = anyNode.closest('a, button, [role="button"], [onclick], .ant-menu-item, .ant-menu-submenu-title, [data-menu-id]');
+            }
           }
           if (!el && params.text) el = document.querySelector(`[aria-label="${params.text}"]`);
           if (!el) return { success: false, error: 'Element not found: ' + (params.selector || params.text) };
@@ -198,8 +206,17 @@
           const newTabExpected = !!(anchor?.target === '_blank')
             || !!(el.target === '_blank')
             || !!(el.closest('[onclick*="window.open"]'));
+          const urlBefore = location.href;
           el.click();
-          return { success: true, data: { tag: el.tagName.toLowerCase(), text: el.textContent?.trim().slice(0, 100), _url: location.href, _newTabExpected } };
+          // Poll briefly for SPA URL change (routing is async after el.click())
+          let urlAfter = urlBefore;
+          if (!newTabExpected) {
+            for (let i = 0; i < 5; i++) {
+              if (location.href !== urlBefore) { urlAfter = location.href; break; }
+              await new Promise(r => setTimeout(r, 100));
+            }
+          }
+          return { success: true, data: { tag: el.tagName.toLowerCase(), text: el.textContent?.trim().slice(0, 100), _url: urlAfter, _newTabExpected: newTabExpected } };
         }
 
         case 'type': {
@@ -250,7 +267,7 @@
                 tag: el.tagName.toLowerCase(),
                 type: el.type || '',
                 selector: el.id ? `#${el.id}` : el.className ? `.${el.className.split(' ').filter(Boolean).join('.')}` : '',
-                text: el.textContent?.trim().slice(0, 50) || el.value || '',
+                text: el.textContent?.trim().slice(0, 50) || el.getAttribute('aria-label') || el.getAttribute('title') || el.value?.slice(0, 50) || el.querySelector('.anticon')?.className || '',
               })).filter(b => b.text || b.selector);
             const forms = [...document.querySelectorAll('form')].map(f => ({
               selector: f.id ? `#${f.id}` : f.className ? `.${f.className.split(' ').filter(Boolean).join('.')}` : '',
@@ -269,7 +286,13 @@
                 label: el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent?.trim().slice(0, 60) || '',
                 expanded: el.getAttribute('aria-expanded') ?? (el.hasAttribute('open') ? 'true' : null),
               })).filter(s => s.label);
-            return { success: true, data: { _url: location.href, _title: document.title, inputs, buttons, forms, navLinks, sections } };
+            const dialogs = [...document.querySelectorAll('[role="dialog"], .ant-modal-content, .ant-drawer-content')]
+              .map(d => ({
+                title: d.querySelector('.ant-modal-title, .ant-drawer-title')?.textContent?.trim() || d.getAttribute('aria-label') || '',
+                inputs: [...d.querySelectorAll('input:not([type="hidden"]), textarea, select')].length,
+                buttons: [...d.querySelectorAll('button, [role="button"]')].map(b => b.textContent?.trim() || b.getAttribute('aria-label') || b.querySelector('.anticon')?.className || '').filter(Boolean),
+              })).filter(d => d.title || d.inputs > 0 || d.buttons.length > 0);
+            return { success: true, data: { _url: location.href, _title: document.title, inputs, buttons, forms, navLinks, sections, dialogs } };
           }
           const root = params.selector
             ? document.querySelector(params.selector)
