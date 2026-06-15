@@ -156,6 +156,7 @@ async function sendMessageWithRetry(tabId, msg, maxRetries = 5) {
 let controlledTabId = null;
 let tabFollowPending = null;
 let tabFollowResolve = null;
+let attachedTabId = null;
 
 chrome.tabs.onCreated.addListener((tab) => {
   if (tab.openerTabId === controlledTabId) {
@@ -166,6 +167,9 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === attachedTabId) {
+    attachedTabId = null;
+  }
   if (tabId === controlledTabId) {
     console.log('[AgentSphere] Controlled tab closed, resetting');
     controlledTabId = null;
@@ -233,7 +237,7 @@ async function executeInPage(commandId, action, params) {
       return;
     }
 
-    // ExecuteJS → use chrome.debugger Runtime.evaluate (bypasses CSP entirely)
+    // ExecuteJS → use chrome.debugger Runtime.evaluate (persistent attach, no flash)
     if (action === 'executeJS') {
       const targetTabId = params.tabId || controlledTabId || (await getActiveTabId());
       if (!targetTabId) {
@@ -241,13 +245,16 @@ async function executeInPage(commandId, action, params) {
         return;
       }
       try {
-        await chrome.debugger.attach({ tabId: targetTabId }, "1.3");
+        if (attachedTabId !== targetTabId) {
+          if (attachedTabId) await chrome.debugger.detach({ tabId: attachedTabId }).catch(() => {});
+          await chrome.debugger.attach({ tabId: targetTabId }, "1.3");
+          attachedTabId = targetTabId;
+        }
         const { result: evalResult } = await chrome.debugger.sendCommand(
           { tabId: targetTabId },
           "Runtime.evaluate",
           { expression: params.code, returnByValue: true }
         );
-        await chrome.debugger.detach({ tabId: targetTabId });
         const rawValue = evalResult?.value;
         sendCallbackSafe(commandId, {
           success: !evalResult?.exceptionDetails,
@@ -258,9 +265,6 @@ async function executeInPage(commandId, action, params) {
           detail: params.code,
         }, targetTabId);
       } catch (e) {
-        if (e.message?.includes('already attached')) {
-          await chrome.debugger.detach({ tabId: targetTabId }).catch(() => {});
-        }
         sendCallbackSafe(commandId, { success: false, error: e.message, action, detail: params.code }, targetTabId);
       }
       return;
@@ -336,27 +340,22 @@ async function getActiveTabId() {
   return tab?.id;
 }
 
-// --- Capture screenshot of a tab via chrome.debugger ---
+// --- Capture screenshot of a tab via chrome.debugger (persistent attach) ---
 async function captureScreenshot(tabId) {
   if (!tabId) return null;
-  let attached = false;
   try {
-    await chrome.debugger.attach({ tabId }, "1.3");
-    attached = true;
+    if (attachedTabId !== tabId) {
+      if (attachedTabId) await chrome.debugger.detach({ tabId: attachedTabId }).catch(() => {});
+      await chrome.debugger.attach({ tabId }, "1.3");
+      attachedTabId = tabId;
+    }
     const { data } = await chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", {
       format: 'jpeg',
       quality: 60,
     });
     return data;
   } catch (e) {
-    if (e.message?.includes('already attached')) {
-      attached = true;
-    }
     return null;
-  } finally {
-    if (attached) {
-      await chrome.debugger.detach({ tabId }).catch(() => {});
-    }
   }
 }
 
