@@ -152,6 +152,18 @@ async function sendMessageWithRetry(tabId, msg, maxRetries = 5) {
   }
 }
 
+// --- Inject content script into a tab on demand ---
+async function injectContentScript(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content.js'],
+    });
+  } catch (e) {
+    // 已存在或注入失败，静默忽略
+  }
+}
+
 // --- Execute command in the appropriate tab ---
 let controlledTabId = null;
 let tabFollowPending = null;
@@ -161,6 +173,7 @@ let attachedTabId = null;
 chrome.tabs.onCreated.addListener((tab) => {
   if (tab.openerTabId === controlledTabId) {
     controlledTabId = tab.id;
+    injectContentScript(tab.id);
     tabFollowPending = { newTabId: tab.id, url: tab.pendingUrl || tab.url || '', time: Date.now() };
     if (tabFollowResolve) { tabFollowResolve(); tabFollowResolve = null; }
   }
@@ -186,6 +199,7 @@ async function executeInPage(commandId, action, params) {
         try {
           console.log('[AgentSphere] Updating existing tab:', params.tabId);
           const tab = await chrome.tabs.update(params.tabId, { url: params.url });
+          await injectContentScript(tab.id);
 
           await new Promise((resolve) => {
             const listener = (tabId, info) => {
@@ -242,6 +256,7 @@ async function executeInPage(commandId, action, params) {
       console.log('[AgentSphere] Creating tab with url:', params.url);
       const tab = await chrome.tabs.create({ url: params.url, active: false });
       console.log('[AgentSphere] Tab created:', tab.id);
+      await injectContentScript(tab.id);
 
       // Wait for page to finish loading (HTML + resources)
       await new Promise((resolve) => {
@@ -315,6 +330,7 @@ async function executeInPage(commandId, action, params) {
       return;
     }
 
+    await injectContentScript(targetTabId);
     console.log('[AgentSphere] Sending to tab', targetTabId, ':', action, params);
 
     const result = await sendMessageWithRetry(targetTabId, {
