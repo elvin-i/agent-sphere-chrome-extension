@@ -118,7 +118,7 @@ async function connectSSE() {
             console.log('[AgentSphere] SSE msg:', msg.eventType, msg.action, msg.url?.slice(0,30));
             if (msg.eventType === 'browser_operation') {
               const cmd = msg.command || msg;
-              const params = { url: cmd.url, selector: cmd.selector, text: cmd.text, code: cmd.code, mode: cmd.mode, tabId: cmd.tabId };
+              const params = { url: cmd.url, selector: cmd.selector, text: cmd.text, code: cmd.code, mode: cmd.mode, tabId: cmd.tabId, append: cmd.append };
               Object.keys(params).forEach(k => { if (params[k] == null) delete params[k]; });
               console.log('[AgentSphere] Calling executeInPage:', cmd.commandId?.slice(0,8), cmd.action, Object.keys(params));
               await executeInPage(cmd.commandId, cmd.action, params);

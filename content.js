@@ -232,10 +232,18 @@
             if (inner) el = inner;
           }
 
+          const isAppend = params.append === true;
+
           // 富文本编辑器 (contenteditable div)
           if (el.isContentEditable) {
             el.focus();
-            el.textContent = params.text;
+            if (isAppend) {
+              const sel = window.getSelection();
+              sel.collapse(el, el.childNodes.length);
+              document.execCommand('insertText', false, params.text);
+            } else {
+              el.textContent = params.text;
+            }
             el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
             return { success: true };
           }
@@ -243,9 +251,11 @@
           // 普通 input/textarea — 通过原生 setter 兼容 React/Vue/Angular
           if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
             el.focus();
+            const currentValue = el.value;
+            const newValue = isAppend ? currentValue + params.text : params.text;
             const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
             const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-            if (nativeSetter) nativeSetter.call(el, params.text);
+            if (nativeSetter) nativeSetter.call(el, newValue);
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             return { success: true };
