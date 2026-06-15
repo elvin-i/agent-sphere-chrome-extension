@@ -3,6 +3,22 @@
  */
 (function () {
 
+  // --- Inject MAIN-world script to intercept window.open ---
+  // (content script ISOLATED world cannot override page methods)
+  try {
+    const s = document.createElement('script');
+    s.textContent = `
+      window.__opencode_lastWindowOpen = 0;
+      window.__opencode_origOpen = window.open;
+      window.open = function() {
+        window.__opencode_lastWindowOpen = Date.now();
+        return window.__opencode_origOpen.apply(this, arguments);
+      };
+    `;
+    document.documentElement.appendChild(s);
+    s.remove();
+  } catch (e) { /* CSP may block, fallback to target="_blank" detection only */ }
+
   // --- Read auth and session info ---
   let lastSessionId = null;
   let lastConnected = null;
@@ -150,8 +166,14 @@
         return { success: true };
 
       case 'click': {
-          const el = document.querySelector(params.selector);
-          if (!el) return { success: false, error: 'Element not found: ' + params.selector };
+          let el = null;
+          if (params.selector) el = document.querySelector(params.selector);
+          if (!el && params.text) {
+            const xpath = `//*[text()[normalize-space()='${params.text.replace(/'/g, "\\'")}']]`;
+            el = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+          }
+          if (!el && params.text) el = document.querySelector(`[aria-label="${params.text}"]`);
+          if (!el) return { success: false, error: 'Element not found: ' + (params.selector || params.text) };
           // 表单提交类元素 → 提取 action URL，不依赖 click()
           const isSubmitBtn = (el.tagName === 'BUTTON' && el.type === 'submit')
             || (el.tagName === 'INPUT' && el.type === 'submit');
@@ -172,8 +194,12 @@
             }
             return { success: true, data: { _submitUrl: url.href, tag: 'form' } };
           }
+          const anchor = el.closest('a');
+          const newTabExpected = !!(anchor?.target === '_blank')
+            || !!(el.target === '_blank')
+            || !!(el.closest('[onclick*="window.open"]'));
           el.click();
-          return { success: true, data: { tag: el.tagName.toLowerCase(), text: el.textContent?.trim().slice(0, 100) } };
+          return { success: true, data: { tag: el.tagName.toLowerCase(), text: el.textContent?.trim().slice(0, 100), _url: location.href, _newTabExpected } };
         }
 
         case 'type': {
@@ -194,9 +220,12 @@
             return { success: true };
           }
 
-          // 普通 input/textarea
+          // 普通 input/textarea — 通过原生 setter 兼容 React/Vue/Angular
           if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-            el.value = params.text;
+            el.focus();
+            const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+            const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+            if (nativeSetter) nativeSetter.call(el, params.text);
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             return { success: true };
@@ -229,7 +258,18 @@
               method: f.method || 'get',
               inputs: [...f.querySelectorAll('input[name], select[name], textarea[name]')].length,
             })).filter(f => f.inputs > 0);
-            return { success: true, data: { _url: location.href, inputs, buttons, forms } };
+            const navLinks = [...document.querySelectorAll('nav a, [role="navigation"] a, [role="menubar"] a')]
+              .map(el => ({
+                text: el.textContent?.trim() || el.getAttribute('aria-label') || '',
+                href: el.href || '',
+              })).filter(l => l.text && l.href);
+            const sections = [...document.querySelectorAll('details, [aria-expanded]')]
+              .map(el => ({
+                tag: el.tagName.toLowerCase(),
+                label: el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent?.trim().slice(0, 60) || '',
+                expanded: el.getAttribute('aria-expanded') ?? (el.hasAttribute('open') ? 'true' : null),
+              })).filter(s => s.label);
+            return { success: true, data: { _url: location.href, _title: document.title, inputs, buttons, forms, navLinks, sections } };
           }
           const root = params.selector
             ? document.querySelector(params.selector)

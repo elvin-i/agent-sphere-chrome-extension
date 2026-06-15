@@ -154,6 +154,23 @@ async function sendMessageWithRetry(tabId, msg, maxRetries = 5) {
 
 // --- Execute command in the appropriate tab ---
 let controlledTabId = null;
+let tabFollowPending = null;
+let tabFollowResolve = null;
+
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.openerTabId === controlledTabId) {
+    controlledTabId = tab.id;
+    tabFollowPending = { newTabId: tab.id, url: tab.pendingUrl || tab.url || '', time: Date.now() };
+    if (tabFollowResolve) { tabFollowResolve(); tabFollowResolve = null; }
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === controlledTabId) {
+    console.log('[AgentSphere] Controlled tab closed, resetting');
+    controlledTabId = null;
+  }
+});
 
 async function executeInPage(commandId, action, params) {
   console.log('[AgentSphere] executeInPage:', action, params);
@@ -231,9 +248,11 @@ async function executeInPage(commandId, action, params) {
           { expression: params.code, returnByValue: true }
         );
         await chrome.debugger.detach({ tabId: targetTabId });
+        const rawValue = evalResult?.value;
         sendCallbackSafe(commandId, {
           success: !evalResult?.exceptionDetails,
-          data: evalResult?.value,
+          data: rawValue !== undefined ? rawValue : '__NO_RETURN__',
+          _resultType: rawValue === undefined ? 'void' : typeof rawValue,
           error: evalResult?.exceptionDetails?.text || null,
           action,
           detail: params.code,
@@ -269,6 +288,40 @@ async function executeInPage(commandId, action, params) {
       console.log('[AgentSphere] Form submit detected, navigating to:', result.data._submitUrl);
       executeInPage(commandId, 'navigate', { url: result.data._submitUrl });
       return;
+    }
+
+    // New tab auto-follow: click opened a new tab → switch to it
+    if (action === 'click' && result?.data?._newTabExpected) {
+      await new Promise((resolve) => {
+        if (tabFollowPending) return resolve();
+        tabFollowResolve = resolve;
+        setTimeout(() => { tabFollowResolve = null; resolve(); }, 5000);
+      });
+      if (tabFollowPending) {
+        // Wait for page load complete
+        await new Promise((resolve) => {
+          const listener = (tabId, info) => {
+            if (tabId === tabFollowPending.newTabId && info.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(listener); resolve();
+            }
+          };
+          chrome.tabs.onUpdated.addListener(listener);
+          setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 10000);
+        });
+        // Wait for SPA idle rendering
+        await chrome.scripting.executeScript({
+          target: { tabId: tabFollowPending.newTabId },
+          func: () => new Promise(r => requestIdleCallback(r, { timeout: 3000 })),
+        }).catch(() => {});
+        // Get final URL (post-redirect)
+        const finalTab = await chrome.tabs.get(tabFollowPending.newTabId).catch(() => null);
+        if (finalTab) tabFollowPending.url = finalTab.url || tabFollowPending.url;
+        result.data._newTabId = tabFollowPending.newTabId;
+        result.data._newTabUrl = tabFollowPending.url;
+        sendCallbackSafe(commandId, { ...result, action, detail: params.selector || '' }, tabFollowPending.newTabId);
+        tabFollowPending = null;
+        return;
+      }
     }
 
     sendCallbackSafe(commandId, { ...result, action, detail: params.selector || params.url || '' }, targetTabId);
