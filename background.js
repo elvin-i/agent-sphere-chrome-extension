@@ -118,7 +118,7 @@ async function connectSSE() {
             console.log('[AgentSphere] SSE msg:', msg.eventType, msg.action, msg.url?.slice(0,30));
             if (msg.eventType === 'browser_operation') {
               const cmd = msg.command || msg;
-              const params = { url: cmd.url, selector: cmd.selector, text: cmd.text, code: cmd.code, mode: cmd.mode };
+              const params = { url: cmd.url, selector: cmd.selector, text: cmd.text, code: cmd.code, mode: cmd.mode, tabId: cmd.tabId };
               Object.keys(params).forEach(k => { if (params[k] == null) delete params[k]; });
               console.log('[AgentSphere] Calling executeInPage:', cmd.commandId?.slice(0,8), cmd.action, Object.keys(params));
               await executeInPage(cmd.commandId, cmd.action, params);
@@ -181,6 +181,43 @@ async function executeInPage(commandId, action, params) {
   try {
     // Navigate → open new tab and wait for page load
     if (action === 'navigate') {
+      // If tabId specified, update that tab instead of creating a new one
+      if (params.tabId) {
+        try {
+          console.log('[AgentSphere] Updating existing tab:', params.tabId);
+          const tab = await chrome.tabs.update(params.tabId, { url: params.url });
+
+          await new Promise((resolve) => {
+            const listener = (tabId, info) => {
+              if (tabId === tab.id && info.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(listener);
+                resolve();
+              }
+            };
+            chrome.tabs.onUpdated.addListener(listener);
+          });
+
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => new Promise(r => requestIdleCallback(r, { timeout: 5000 })),
+          }).catch(() => {});
+
+          const finalTab = await chrome.tabs.get(tab.id).catch(() => tab);
+          const finalUrl = finalTab.url || params.url;
+
+          controlledTabId = tab.id;
+          sendCallbackSafe(commandId, {
+            success: true,
+            data: { tabId: tab.id, url: finalUrl, redirected: finalUrl !== params.url },
+            action: 'navigate',
+            detail: params.url,
+          }, tab.id);
+          return;
+        } catch (e) {
+          console.log('[AgentSphere] Failed to update tab, falling back to create:', e.message);
+        }
+      }
+
       // Reuse existing tab if same URL is already open
       if (controlledTabId) {
         try {
