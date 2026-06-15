@@ -177,7 +177,10 @@
             // Phase 3: any descendant contains → up-search to clickable ancestor
             if (!el) {
               const anyNode = document.evaluate(`//*[contains(., '${text}')]`, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-              if (anyNode) el = anyNode.closest('a, button, [role="button"], [onclick], .ant-menu-item, .ant-menu-submenu-title, [data-menu-id]');
+              if (anyNode) {
+                el = anyNode.closest('a, button, [role="button"], [onclick], summary, [aria-haspopup], [tabindex]:not([tabindex="-1"])');
+                if (!el) el = anyNode; // React delegation handles click on child elements
+              }
             }
           }
           if (!el && params.text) el = document.querySelector(`[aria-label="${params.text}"]`);
@@ -267,7 +270,7 @@
                 tag: el.tagName.toLowerCase(),
                 type: el.type || '',
                 selector: el.id ? `#${el.id}` : el.className ? `.${el.className.split(' ').filter(Boolean).join('.')}` : '',
-                text: el.textContent?.trim().slice(0, 50) || el.getAttribute('aria-label') || el.getAttribute('title') || el.value?.slice(0, 50) || el.querySelector('.anticon')?.className || '',
+                text: el.textContent?.trim().slice(0, 50) || el.getAttribute('aria-label') || el.getAttribute('title') || el.value?.slice(0, 50) || '',
               })).filter(b => b.text || b.selector);
             const forms = [...document.querySelectorAll('form')].map(f => ({
               selector: f.id ? `#${f.id}` : f.className ? `.${f.className.split(' ').filter(Boolean).join('.')}` : '',
@@ -275,7 +278,7 @@
               method: f.method || 'get',
               inputs: [...f.querySelectorAll('input[name], select[name], textarea[name]')].length,
             })).filter(f => f.inputs > 0);
-            const navLinks = [...document.querySelectorAll('nav a, [role="navigation"] a, [role="menubar"] a')]
+            const navLinks = [...document.querySelectorAll('nav a, [role="navigation"] a, [role="menubar"] a, [role="menuitem"] a')]
               .map(el => ({
                 text: el.textContent?.trim() || el.getAttribute('aria-label') || '',
                 href: el.href || '',
@@ -286,12 +289,16 @@
                 label: el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent?.trim().slice(0, 60) || '',
                 expanded: el.getAttribute('aria-expanded') ?? (el.hasAttribute('open') ? 'true' : null),
               })).filter(s => s.label);
-            const dialogs = [...document.querySelectorAll('[role="dialog"], .ant-modal-content, .ant-drawer-content')]
-              .map(d => ({
-                title: d.querySelector('.ant-modal-title, .ant-drawer-title')?.textContent?.trim() || d.getAttribute('aria-label') || '',
-                inputs: [...d.querySelectorAll('input:not([type="hidden"]), textarea, select')].length,
-                buttons: [...d.querySelectorAll('button, [role="button"]')].map(b => b.textContent?.trim() || b.getAttribute('aria-label') || b.querySelector('.anticon')?.className || '').filter(Boolean),
-              })).filter(d => d.title || d.inputs > 0 || d.buttons.length > 0);
+            const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+              .map(d => {
+                const labelId = d.getAttribute('aria-labelledby');
+                const labelEl = labelId && document.getElementById(labelId);
+                return {
+                  title: labelEl?.textContent?.trim() || d.getAttribute('aria-label') || '',
+                  inputs: [...d.querySelectorAll('input:not([type="hidden"]), textarea, select')].length,
+                  buttons: [...d.querySelectorAll('button, [role="button"]')].map(b => b.textContent?.trim() || b.getAttribute('aria-label') || '').filter(Boolean),
+                };
+              }).filter(d => d.title || d.inputs > 0 || d.buttons.length > 0);
             return { success: true, data: { _url: location.href, _title: document.title, inputs, buttons, forms, navLinks, sections, dialogs } };
           }
           const root = params.selector
