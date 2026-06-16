@@ -54,7 +54,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 // --- Listen for auth info from content script ---
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'auth' && msg.token && msg.sessionId) {
     token = msg.token;
     sessionId = msg.sessionId;
@@ -71,6 +71,36 @@ chrome.runtime.onMessage.addListener((msg) => {
       if (logs.length > 200) logs.splice(0, logs.length - 200);
       chrome.storage.local.set({ logs }).catch(() => {});
     });
+    return;
+  }
+  // content.js 委托 executeJS → 走 chrome.debugger.Runtime.evaluate（绕过 CSP）
+  if (msg.type === 'execute_js') {
+    (async () => {
+      try {
+        const targetTabId = msg.tabId || controlledTabId || (await getActiveTabId());
+        if (!targetTabId) { sendResponse({ success: false, error: 'No target tab' }); return; }
+        if (attachedTabId !== targetTabId) {
+          if (attachedTabId) await chrome.debugger.detach({ tabId: attachedTabId }).catch(() => {});
+          await chrome.debugger.attach({ tabId: targetTabId }, "1.3");
+          attachedTabId = targetTabId;
+        }
+        const { result: evalResult } = await chrome.debugger.sendCommand(
+          { tabId: targetTabId },
+          "Runtime.evaluate",
+          { expression: msg.code, returnByValue: true }
+        );
+        const rawValue = evalResult?.value;
+        sendResponse({
+          success: !evalResult?.exceptionDetails,
+          data: rawValue !== undefined ? rawValue : '__NO_RETURN__',
+          _resultType: rawValue === undefined ? 'void' : typeof rawValue,
+          error: evalResult?.exceptionDetails?.text || null,
+        });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true; // 异步回复
   }
 });
 

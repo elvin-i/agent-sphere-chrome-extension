@@ -5,19 +5,13 @@
 
   // --- Inject MAIN-world script to intercept window.open ---
   // (content script ISOLATED world cannot override page methods)
+  // Use chrome-extension:// file reference instead of inline <script> to avoid CSP
   try {
     const s = document.createElement('script');
-    s.textContent = `
-      window.__opencode_lastWindowOpen = 0;
-      window.__opencode_origOpen = window.open;
-      window.open = function() {
-        window.__opencode_lastWindowOpen = Date.now();
-        return window.__opencode_origOpen.apply(this, arguments);
-      };
-    `;
+    s.src = chrome.runtime.getURL('page-script.js');
+    s.onload = () => s.remove();
     document.documentElement.appendChild(s);
-    s.remove();
-  } catch (e) { /* CSP may block, fallback to target="_blank" detection only */ }
+  } catch (e) { /* fallback to target="_blank" detection only */ }
 
   // --- Read auth and session info ---
   let lastSessionId = null;
@@ -133,6 +127,162 @@
     }
   }
 
+  // --- Editor framework detection for type action ---
+  function detectEditorType(el) {
+    if (!el) return 'unknown';
+    // Draft.js
+    if (el.closest('.DraftEditor-root') || el.classList.contains('public-DraftEditor-content') || el.classList.contains('DraftEditor-editorContainer')) {
+      return 'draft-js';
+    }
+    // Quill
+    if (el.closest('.ql-container') || el.classList.contains('ql-editor')) {
+      return 'quill';
+    }
+    // ProseMirror / TipTap
+    if (el.classList.contains('ProseMirror')) {
+      return 'prosemirror';
+    }
+    // Slate.js
+    if (el.closest('[data-slate-editor]') || el.hasAttribute('data-slate-editor')) {
+      return 'slate';
+    }
+    // Lexical (used by some modern editors)
+    if (el.closest('[data-lexical-editor]') || el.classList.contains('lexical-editor') || document.querySelector('[data-lexical-editor]')) {
+      return 'lexical';
+    }
+    // Froala
+    if (el.closest('.fr-box') || el.classList.contains('fr-element')) {
+      return 'froala';
+    }
+    // TinyMCE
+    if (el.closest('.mce-content-body') || el.id?.startsWith('tiny') || document.querySelector('.mce-tinymce')) {
+      return 'tinymce';
+    }
+    // TipTap detached editor (falls back to prosemirror if .ProseMirror present)
+    if (el.hasAttribute('contenteditable') || el.isContentEditable) {
+      return 'contenteditable';
+    }
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      return 'input';
+    }
+    return 'unknown';
+  }
+
+  // --- Draft.js paste simulation (triggers handlePastedText → React state update) ---
+  async function typeInDraftJS(el, text, isAppend) {
+    el.focus();
+    const currentText = el.textContent || '';
+    const finalText = isAppend ? currentText + text : text;
+
+    // Strategy 1: Paste 模拟（触发 Draft.js handlePastedText → React state 更新）
+    const dt = new DataTransfer();
+    dt.setData('text/plain', finalText);
+    dt.setData('text/html', `<p>${finalText.replace(/\n/g, '</p><p>')}</p>`);
+    el.dispatchEvent(new ClipboardEvent('paste', {
+      clipboardData: dt, bubbles: true, cancelable: true,
+    }));
+    dt.clearData();
+
+    // 验证：等 React batch update 后检查文本是否写入
+    await new Promise(r => setTimeout(r, 50));
+    if ((el.textContent || '').includes(finalText.slice(0, 20))) {
+      return { success: true, method: 'draft-paste' };
+    }
+
+    // Strategy 2: execCommand 兜底（Draft.js 部分版本响应 insertText）
+    const sel = window.getSelection();
+    sel.collapse(el, el.childNodes.length);
+    document.execCommand('insertText', false, finalText);
+    await new Promise(r => setTimeout(r, 50));
+    if ((el.textContent || '').includes(finalText.slice(0, 20))) {
+      return { success: true, method: 'draft-exec' };
+    }
+
+    return { success: false, error: 'Draft.js insert failed after paste and execCommand strategies' };
+  }
+
+  // --- Quill API insertion (accesses __quill on parent container) ---
+  function typeInQuill(el, text, isAppend) {
+    el.focus();
+    const container = el.closest('.ql-container');
+    const quill = container?.__quill || container?.parentElement?.__quill;
+    if (quill) {
+      const index = isAppend ? quill.getLength() : (quill.getSelection()?.index ?? quill.getLength());
+      quill.insertText(index, text, 'user');
+      return { success: true, method: 'quill-api' };
+    }
+    // Fallback: attempt dangerouslyPasteHTML
+    if (container) {
+      const qlEditor = container.querySelector('.ql-editor');
+      if (qlEditor) {
+        qlEditor.innerHTML = isAppend ? qlEditor.innerHTML + text : text;
+        qlEditor.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+        return { success: true, method: 'quill-innerhtml' };
+      }
+    }
+    return { success: false, error: 'Quill instance not found' };
+  }
+
+  // --- ProseMirror / TipTap insertion (execCommand already works, add dispatcher fallback) ---
+  function typeInProseMirror(el, text, isAppend) {
+    el.focus();
+    if (isAppend) {
+      const sel = window.getSelection();
+      sel.collapse(el, el.childNodes.length);
+    }
+    document.execCommand('insertText', false, text);
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+    return { success: true, method: 'prosemirror-exec' };
+  }
+
+  // --- Lexical editor insertion ---
+  function typeInLexical(el, text, isAppend) {
+    el.focus();
+    if (isAppend) {
+      const sel = window.getSelection();
+      sel.collapse(el, el.childNodes.length);
+    }
+    document.execCommand('insertText', false, text);
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+    return { success: true, method: 'lexical-exec' };
+  }
+
+  // --- Insert text into plain contenteditable ---
+  function typeInContentEditable(el, text, isAppend) {
+    el.focus();
+    if (isAppend) {
+      const sel = window.getSelection();
+      sel.collapse(el, el.childNodes.length);
+      document.execCommand('insertText', false, text);
+    } else {
+      el.textContent = text;
+    }
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+    return { success: true, method: 'contenteditable' };
+  }
+
+  // --- React-compatible input/textarea setter (native setter + _valueTracker cleanup) ---
+  function typeInInput(el, text, isAppend) {
+    el.focus();
+    const currentValue = el.value;
+    const newValue = isAppend ? currentValue + text : text;
+    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (!nativeSetter) {
+      el.value = newValue;
+    } else {
+      nativeSetter.call(el, newValue);
+      // Clear React's value tracker so it detects the change
+      const tracker = el._valueTracker;
+      if (tracker) {
+        try { tracker.setValue(currentValue); } catch (e) {}
+      }
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { success: true, method: 'input-native' };
+  }
+
   // --- Listen for browser operation commands from background ---
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'browser_operation') {
@@ -233,35 +383,31 @@
           }
 
           const isAppend = params.append === true;
+          const editorType = detectEditorType(el);
 
-          // 富文本编辑器 (contenteditable div)
-          if (el.isContentEditable) {
-            el.focus();
-            if (isAppend) {
-              const sel = window.getSelection();
-              sel.collapse(el, el.childNodes.length);
-              document.execCommand('insertText', false, params.text);
-            } else {
-              el.textContent = params.text;
-            }
-            el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
-            return { success: true };
+          switch (editorType) {
+            case 'draft-js':
+              return typeInDraftJS(el, params.text, isAppend);
+            case 'quill':
+              return typeInQuill(el, params.text, isAppend);
+            case 'prosemirror':
+              return typeInProseMirror(el, params.text, isAppend);
+            case 'lexical':
+              return typeInLexical(el, params.text, isAppend);
+            case 'contenteditable':
+              return typeInContentEditable(el, params.text, isAppend);
+            case 'input':
+              return typeInInput(el, params.text, isAppend);
+            default:
+              // 未知类型 — 尝试降级链
+              if (el.isContentEditable) {
+                return typeInContentEditable(el, params.text, isAppend);
+              }
+              if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+                return typeInInput(el, params.text, isAppend);
+              }
+              return { success: false, error: 'Unsupported element: ' + el.tagName };
           }
-
-          // 普通 input/textarea — 通过原生 setter 兼容 React/Vue/Angular
-          if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-            el.focus();
-            const currentValue = el.value;
-            const newValue = isAppend ? currentValue + params.text : params.text;
-            const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-            const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-            if (nativeSetter) nativeSetter.call(el, newValue);
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            return { success: true };
-          }
-
-          return { success: false, error: 'Unsupported element: ' + el.tagName };
         }
 
         case 'getContent': {
@@ -271,7 +417,7 @@
                 tag: el.tagName.toLowerCase(),
                 type: el.type || '',
                 name: el.name || '',
-                selector: el.id ? `#${el.id}` : el.name ? `[name="${el.name}"]` : '',
+                selector: el.id ? `#${el.id}` : el.name ? `[name="${el.name}"]` : el.className && typeof el.className === 'string' ? `.${el.className.trim().split(/\s+/).filter(Boolean).join('.')}` : '',
                 placeholder: el.placeholder || '',
                 value: el.value || el.textContent?.slice(0, 50) || '',
               })).filter(i => i.selector || i.placeholder || i.name);
@@ -321,8 +467,13 @@
         }
 
         case 'executeJS': {
-          const fn = new Function(params.code);
-          return { success: true, data: fn() };
+          // Delegated to background.js chrome.debugger.Runtime.evaluate (bypasses CSP)
+          const result = await chrome.runtime.sendMessage(chrome.runtime.id, {
+            type: 'execute_js',
+            tabId: params.tabId || null,
+            code: params.code,
+          });
+          return result || { success: false, error: 'executeJS delegation returned no result' };
         }
 
         default:
